@@ -41,5 +41,5 @@ Build steps and what I learned along the way are in [BUILD_NOTES.md](BUILD_NOTES
 
 ## My other projects
 
-- [people-flow-analysis](https://github.com/guagua-paopao/people-flow-analysis): people-flow analysis from live camera video
+- [people-tracking-and-counting](https://github.com/guagua-paopao/people-tracking-and-counting): tracks and counts people from live camera video
 - [document-qa-assistant](https://github.com/guagua-paopao/document-qa-assistant): an AI assistant that answers questions from company documents

@@ -22,7 +22,7 @@ The trained models and datasets aren't in this repo, so you'll need your own mod
 
 ## How I built it
 
-I started from my people-flow project and kept the parts that had nothing to do with people, like the shared camera reader, task control, PostgreSQL storage, callbacks and monitoring. I wrote the vehicle logic as its own module and deleted the people-counting code once the vehicle version could replace it.
+I started from my people tracking project and kept the parts that had nothing to do with people, like the shared camera reader, task control, PostgreSQL storage, callbacks and monitoring. I wrote the vehicle logic as its own module and deleted the people-counting code once the vehicle version could replace it.
 
 1. First I froze the baseline, the config and the event format.
 2. Then I sorted out the data side: vehicle labels, labelling rules and a record of dataset licences.
