@@ -2,37 +2,35 @@
 
 By Zichun Ai, MSc Internet of Things with AI, University of Bristol
 
-This system watches traffic-camera video, finds each vehicle and follows it, then works out what type it is (sedan, SUV, van, bus, truck and so on) and what colour it is. Each vehicle ends up as one clean record, something like "a white SUV passed camera 1 at 14:02", with a snapshot.
+You give this traffic-camera video and it finds each vehicle, follows it, and works out what type it is (sedan, SUV, van, bus, truck and so on) and what colour it is. Each vehicle ends up as one clean record with a snapshot, something like "a white SUV passed camera 1 at 14:02".
 
-It is my own learning version of the two-stage vehicle system I worked on during my machine-vision internship (May–Aug 2026).
+It's my own learning version of the two-stage vehicle system I worked on during my machine-vision internship (May–Aug 2026).
 
 ## How it works
 
-1. **Find the vehicles** in each frame.
-2. **Follow each one** so the same car isn't counted twice.
-3. **Pick the clearest picture** of it.
-4. **Work out its type and colour** with two specialised AI models.
-5. **Give one answer per vehicle** by combining several frames. If it still isn't sure, it says "unknown" instead of guessing.
-6. **Save the record** and snapshot, ready to search or send to other systems.
+1. It finds the vehicles in each frame.
+2. It follows each one so the same car doesn't get counted twice.
+3. It picks the clearest picture of that vehicle.
+4. Two AI models work out the type and the colour.
+5. It combines several frames into one answer per vehicle, and says "unknown" if it still isn't sure.
+6. It saves the record and the snapshot, ready to search or send to other systems.
 
 ## What it achieved
 
-| | |
-|---|---|
-| **Time per frame** | 43.8 ms before optimisation, 17.9 ms after, using the same AI models |
-| **Live video** | Keeps up with a 25 frames-per-second stream (24.8 FPS, up from 21.4) |
-| **Top speed** | 21.9 FPS before, 39.7 FPS after, with no frame-rate limit |
-| **Long run** | 45,000 frames over about 30 minutes, recovering from a forced video restart |
-| **Finding vehicles** | Detection score (mAP50, where 1.0 is perfect): 0.75 on the general test set, 0.92 on the BMD-45 test set |
-| **Type and colour** | About 93.5% correct when it gives an answer. It answers for about 80% of type checks and 75% of colour checks |
+- Each frame used to take 43.8 ms and now takes 17.9 ms, with the same AI models.
+- On a 25 frames-per-second live stream it now keeps up at 24.8 FPS, up from 21.4.
+- With no frame-rate limit it went from 21.9 FPS to 39.7 FPS.
+- It ran through 45,000 frames over about 30 minutes and recovered when I forced the video to restart.
+- Its detection score (mAP50, where 1.0 is perfect) is 0.75 on the general test set and 0.92 on the BMD-45 test set.
+- When it does give a type or colour it's right about 93.5% of the time, and it gives an answer for about 80% of type checks and 75% of colour checks.
 
-The speed-up comes from doing more of the image work on the GPU, copying less data around, and saving snapshots in the background. The answers stayed the same: checks on 200 frames and 1,418 vehicle pictures found no difference.
+The speed-up came from doing more of the image work on the GPU, copying less data around and saving snapshots in the background. I checked 200 frames and 1,418 vehicle pictures afterwards and the answers hadn't changed.
 
 ## Good to know
 
-- The speed numbers come from my RTX 4080 laptop and a looped 60-second test video, not a live roadside camera.
-- Vehicle type is the hardest part. Across a vehicle's whole journey through the scene, about half still end up as "unknown".
-- The model files and datasets aren't in this repository, so the code can't be run on its own.
+- The speed numbers are from my RTX 4080 laptop and a looped 60-second test video, so they aren't from a live roadside camera.
+- Vehicle type is the hardest part, and about half of vehicles still end up as "unknown" by the end of their journey through the scene.
+- The model files and datasets aren't in this repo, so you can't run the code on its own.
 - This is a non-commercial learning project.
 
 ## Built with
