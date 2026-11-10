@@ -1,0 +1,527 @@
+cmake_minimum_required(VERSION 3.24)
+
+# CMake needs the CUDA compiler before project(... LANGUAGES CUDA).
+set(YOLO11_CUDA_ROOT "" CACHE PATH "CUDA toolkit root")
+if(NOT YOLO11_CUDA_ROOT AND DEFINED ENV{CUDA_PATH})
+    file(TO_CMAKE_PATH "$ENV{CUDA_PATH}" YOLO11_CUDA_ROOT)
+endif()
+if(YOLO11_CUDA_ROOT AND NOT DEFINED CMAKE_CUDA_COMPILER)
+    set(CMAKE_CUDA_COMPILER "${YOLO11_CUDA_ROOT}/bin/nvcc.exe" CACHE FILEPATH "CUDA compiler")
+endif()
+
+project(car_detect VERSION 0.1.0 LANGUAGES CXX CUDA)
+
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND
+   CMAKE_CL_SHOWINCLUDES_PREFIX STREQUAL "娉ㄦ剰: 鍖呭惈鏂囦欢:  ")
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "注意: 包含文件:  ")
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if(NOT CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 89)
+endif()
+
+if(MSVC)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/utf-8")
+endif()
+add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+
+set(TENSORRT_ROOT "" CACHE PATH "TensorRT 10 root")
+if(NOT TENSORRT_ROOT AND DEFINED ENV{TENSORRT_ROOT})
+    file(TO_CMAKE_PATH "$ENV{TENSORRT_ROOT}" TENSORRT_ROOT)
+endif()
+if(NOT TENSORRT_ROOT)
+    message(FATAL_ERROR "Pass -DTENSORRT_ROOT=<TensorRT-10-root>")
+endif()
+if(NOT YOLO11_CUDA_ROOT)
+    message(FATAL_ERROR "Pass -DYOLO11_CUDA_ROOT=<CUDA-root> or set CUDA_PATH")
+endif()
+
+find_library(NVINFER_LIB NAMES nvinfer_10 PATHS "${TENSORRT_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+find_library(NVINFER_PLUGIN_LIB NAMES nvinfer_plugin_10 PATHS "${TENSORRT_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+find_library(CUDART_LIB NAMES cudart PATHS "${YOLO11_CUDA_ROOT}/lib/x64" NO_DEFAULT_PATH REQUIRED)
+
+find_package(OpenCV REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(yaml-cpp CONFIG REQUIRED)
+find_package(Crow CONFIG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
+find_package(PostgreSQL REQUIRED)
+find_package(hiredis CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
+
+set(PROJECT_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
+
+add_library(postgres_storage STATIC src/business/postgres_client.cpp)
+target_include_directories(postgres_storage PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(postgres_storage PUBLIC PostgreSQL::PostgreSQL)
+
+add_library(camera_task_storage STATIC src/business/camera_task_repository.cpp)
+target_include_directories(camera_task_storage PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_task_storage PUBLIC postgres_storage nlohmann_json::nlohmann_json)
+
+add_library(app_support STATIC
+    src/server/app_config.cpp
+    src/server/app_logger.cpp
+    src/server/camera_profile.cpp
+    src/server/camera_profile_registry.cpp
+    src/server/uri_masker.cpp
+)
+target_include_directories(app_support PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(app_support PUBLIC yaml-cpp::yaml-cpp spdlog::spdlog)
+
+add_library(camera_capture_runtime STATIC
+    src/business/rtsp_capture_reader.cpp
+    src/business/ffmpeg_process_capture_reader.cpp
+    src/server/ffmpeg_open_coordinator.cpp
+    src/server/shared_camera_frame_hub.cpp
+    src/server/rtsp_camera_frame_source.cpp
+)
+target_include_directories(camera_capture_runtime PUBLIC "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_capture_runtime PUBLIC app_support spdlog::spdlog ${OpenCV_LIBS} Threads::Threads)
+
+add_library(camera_task_scheduling STATIC src/server/camera_task_manager.cpp)
+target_include_directories(camera_task_scheduling PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_task_scheduling PUBLIC spdlog::spdlog Threads::Threads)
+
+add_library(camera_run_contract STATIC src/server/camera_run_spec.cpp)
+target_include_directories(camera_run_contract PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_run_contract PUBLIC
+    camera_task_scheduling nlohmann_json::nlohmann_json)
+
+add_library(camera_inference_pool STATIC src/server/camera_inference_pool.cpp)
+target_include_directories(camera_inference_pool PUBLIC "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_inference_pool PUBLIC
+    app_support spdlog::spdlog ${OpenCV_LIBS} Threads::Threads)
+
+add_library(analysis_snapshot_writer STATIC
+    src/server/analysis_snapshot_writer.cpp)
+target_include_directories(analysis_snapshot_writer PUBLIC
+    "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(analysis_snapshot_writer PUBLIC
+    ${OpenCV_LIBS} Threads::Threads)
+
+add_library(vehicle_model_contract STATIC src/server/vehicle_model_contract.cpp)
+target_include_directories(vehicle_model_contract PUBLIC "${PROJECT_INCLUDE_DIR}")
+
+add_library(vehicle_tensorrt_adapters STATIC
+    src/server/vehicle_tensorrt_adapters.cpp
+    src/server/vehicle_cuda_attribute_preprocess.cu
+    src/server/vehicle_cuda_preprocess.cu
+    src/server/vehicle_cuda_postprocess.cu)
+target_include_directories(vehicle_tensorrt_adapters PUBLIC
+    "${PROJECT_INCLUDE_DIR}" "${TENSORRT_ROOT}/include" "${YOLO11_CUDA_ROOT}/include")
+if(MSVC)
+    target_compile_options(vehicle_tensorrt_adapters PRIVATE
+        "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
+endif()
+target_link_libraries(vehicle_tensorrt_adapters PUBLIC
+    vehicle_model_contract OpenSSL::Crypto
+    "${NVINFER_LIB}" "${NVINFER_PLUGIN_LIB}" "${CUDART_LIB}")
+
+add_library(vehicle_cascade_core STATIC src/business/vehicle_cascade_runtime.cpp)
+target_include_directories(vehicle_cascade_core PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_cascade_core PUBLIC vehicle_model_contract)
+
+add_library(vehicle_runtime_loader STATIC src/server/vehicle_runtime_loader.cpp)
+target_include_directories(vehicle_runtime_loader PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_runtime_loader PUBLIC
+    app_support vehicle_cascade_core nlohmann_json::nlohmann_json)
+
+add_library(vehicle_event_persistence STATIC
+    src/business/vehicle_event_publisher.cpp)
+target_include_directories(vehicle_event_persistence PUBLIC
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_event_persistence PUBLIC
+    vehicle_cascade_core camera_task_storage OpenSSL::Crypto)
+
+add_library(vehicle_attribute_scheduler STATIC
+    src/server/vehicle_attribute_batch_scheduler.cpp)
+target_include_directories(vehicle_attribute_scheduler PUBLIC
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_attribute_scheduler PUBLIC
+    vehicle_model_contract Threads::Threads)
+
+add_library(camera_algorithm_runtime STATIC
+    src/server/camera_algorithm_processor.cpp)
+target_include_directories(camera_algorithm_runtime PUBLIC "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_algorithm_runtime PUBLIC
+    camera_inference_pool camera_task_storage
+    vehicle_tensorrt_adapters vehicle_runtime_loader vehicle_event_persistence
+    vehicle_attribute_scheduler analysis_snapshot_writer
+    nlohmann_json::nlohmann_json OpenSSL::Crypto ${OpenCV_LIBS} Threads::Threads)
+
+add_library(callback_delivery_runtime STATIC src/server/callback_delivery_worker.cpp)
+target_include_directories(callback_delivery_runtime PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(callback_delivery_runtime PUBLIC
+    app_support camera_task_storage nlohmann_json::nlohmann_json
+    OpenSSL::Crypto spdlog::spdlog Threads::Threads)
+if(WIN32)
+    target_link_libraries(callback_delivery_runtime PUBLIC winhttp)
+endif()
+
+add_library(camera_task_redis STATIC src/server/camera_task_queue.cpp)
+target_include_directories(camera_task_redis PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_task_redis PUBLIC camera_task_scheduling hiredis::hiredis nlohmann_json::nlohmann_json)
+if(WIN32)
+    target_link_libraries(camera_task_redis PUBLIC ws2_32)
+endif()
+
+add_library(camera_task_runtime STATIC
+    src/business/frame_artifact_writer.cpp
+    src/business/camera_frame_retention.cpp
+    src/business/camera_pipeline.cpp
+    src/server/camera_task_runtime.cpp
+)
+target_include_directories(camera_task_runtime PUBLIC "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_task_runtime PUBLIC
+    camera_capture_runtime camera_task_storage camera_task_redis camera_run_contract
+    spdlog::spdlog ${OpenCV_LIBS} Threads::Threads)
+
+add_library(camera_task_http STATIC
+    src/server/camera_task_http_controller.cpp
+    src/server/unified_camera_application_service.cpp
+)
+target_include_directories(camera_task_http PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_task_http PUBLIC
+    app_support camera_task_storage camera_task_redis camera_run_contract Crow::Crow
+    nlohmann_json::nlohmann_json OpenSSL::Crypto)
+
+add_library(runtime_redis STATIC src/server/redis_task_queue.cpp)
+target_include_directories(runtime_redis PUBLIC "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(runtime_redis PUBLIC hiredis::hiredis)
+if(WIN32)
+    target_link_libraries(runtime_redis PUBLIC ws2_32)
+endif()
+
+add_executable(four_stage_server
+    src/server/main_server.cpp
+    src/server/vision_http_server.cpp
+)
+target_include_directories(four_stage_server PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(four_stage_server PRIVATE
+    app_support camera_task_http runtime_redis
+    Crow::Crow nlohmann_json::nlohmann_json spdlog::spdlog)
+
+add_executable(four_stage_worker
+    src/server/main_vision_worker.cpp
+    src/server/vision_worker_host.cpp
+    src/server/model_runner.cpp
+)
+target_include_directories(four_stage_worker PRIVATE
+    "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(four_stage_worker PRIVATE
+    app_support camera_capture_runtime camera_task_runtime camera_task_scheduling
+    camera_inference_pool camera_algorithm_runtime callback_delivery_runtime
+    vehicle_tensorrt_adapters vehicle_runtime_loader
+    runtime_redis
+    nlohmann_json::nlohmann_json spdlog::spdlog ${OpenCV_LIBS})
+
+enable_testing()
+add_executable(vehicle_model_contract_test tests/vehicle_model_contract_test.cpp)
+target_include_directories(vehicle_model_contract_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_model_contract_test PRIVATE vehicle_model_contract)
+add_test(NAME vehicle_model_contract_test COMMAND vehicle_model_contract_test)
+
+add_executable(vehicle_tensorrt_adapter_contract_test
+    tests/vehicle_tensorrt_adapter_contract_test.cpp)
+target_include_directories(vehicle_tensorrt_adapter_contract_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_tensorrt_adapter_contract_test PRIVATE
+    vehicle_tensorrt_adapters)
+add_test(
+    NAME vehicle_tensorrt_adapter_contract_test
+    COMMAND vehicle_tensorrt_adapter_contract_test)
+
+add_executable(vehicle_tensorrt_real_engine_test
+    tests/vehicle_tensorrt_real_engine_test.cpp)
+target_include_directories(vehicle_tensorrt_real_engine_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_tensorrt_real_engine_test PRIVATE
+    vehicle_tensorrt_adapters)
+add_test(
+    NAME vehicle_tensorrt_real_engine_test
+    COMMAND vehicle_tensorrt_real_engine_test "${CMAKE_SOURCE_DIR}")
+set_tests_properties(vehicle_tensorrt_real_engine_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+add_executable(vehicle_best_models_real_engine_test
+    tests/vehicle_best_models_real_engine_test.cpp)
+target_include_directories(vehicle_best_models_real_engine_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_best_models_real_engine_test PRIVATE
+    vehicle_tensorrt_adapters)
+add_test(
+    NAME vehicle_best_models_real_engine_test
+    COMMAND vehicle_best_models_real_engine_test "${CMAKE_SOURCE_DIR}")
+set_tests_properties(vehicle_best_models_real_engine_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+# Isolated v32 candidate-only runtime probe.  This is deliberately opt-in so
+# the production build and its single-branch registry remain unchanged.
+option(VCAS_BUILD_V32_CANDIDATE_TEST
+    "Build the isolated v32 adaptive color-router TensorRT contract test"
+    OFF)
+if(VCAS_BUILD_V32_CANDIDATE_TEST)
+    add_executable(vehicle_dual_branch_router_contract_test
+        tests/vehicle_dual_branch_router_contract_test.cpp)
+    target_include_directories(vehicle_dual_branch_router_contract_test PRIVATE
+        "${PROJECT_INCLUDE_DIR}")
+    target_link_libraries(vehicle_dual_branch_router_contract_test PRIVATE
+        vehicle_tensorrt_adapters)
+    add_test(
+        NAME vehicle_dual_branch_router_contract_test
+        COMMAND vehicle_dual_branch_router_contract_test
+            "${CMAKE_SOURCE_DIR}/training/artifacts/attribute-domain-v2/stage32-color-router")
+    set_tests_properties(vehicle_dual_branch_router_contract_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+endif()
+
+# Isolated Stage71 decoupled body/color candidate probe. This target is
+# opt-in and receives candidate paths and hashes only at invocation time, so
+# configuring or building it cannot modify the production registry/config.
+option(VCAS_BUILD_STAGE71_CANDIDATE_TEST
+    "Build the Stage71 decoupled TensorRT real-engine contract test"
+    OFF)
+if(VCAS_BUILD_STAGE71_CANDIDATE_TEST)
+    add_executable(vehicle_stage71_decoupled_real_engine_test
+        tests/vehicle_stage71_decoupled_real_engine_test.cpp)
+    target_include_directories(vehicle_stage71_decoupled_real_engine_test PRIVATE
+        "${PROJECT_INCLUDE_DIR}")
+    target_link_libraries(vehicle_stage71_decoupled_real_engine_test PRIVATE
+        vehicle_tensorrt_adapters)
+    if(MSVC)
+        target_compile_options(vehicle_stage71_decoupled_real_engine_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(vehicle_stage71_decoupled_real_engine_test PRIVATE -UNDEBUG)
+    endif()
+endif()
+
+add_executable(vehicle_cascade_runtime_test tests/vehicle_cascade_runtime_test.cpp)
+target_include_directories(vehicle_cascade_runtime_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_cascade_runtime_test PRIVATE vehicle_cascade_core)
+add_test(NAME vehicle_cascade_runtime_test COMMAND vehicle_cascade_runtime_test)
+
+add_executable(vehicle_attribute_batch_scheduler_test
+    tests/vehicle_attribute_batch_scheduler_test.cpp)
+target_include_directories(vehicle_attribute_batch_scheduler_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_attribute_batch_scheduler_test PRIVATE
+    vehicle_attribute_scheduler Threads::Threads)
+add_test(NAME vehicle_attribute_batch_scheduler_test
+    COMMAND vehicle_attribute_batch_scheduler_test)
+
+# These contract tests intentionally use assert for both invocation and
+# verification. Keep assertions enabled in Release builds so the tests cannot
+# silently skip their checks when NDEBUG is defined by the build type.
+foreach(vehicle_contract_test IN ITEMS
+    vehicle_model_contract_test
+    vehicle_tensorrt_adapter_contract_test
+    vehicle_tensorrt_real_engine_test
+    vehicle_best_models_real_engine_test
+    vehicle_cascade_runtime_test)
+    if(MSVC)
+        target_compile_options(${vehicle_contract_test} PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(${vehicle_contract_test} PRIVATE -UNDEBUG)
+    endif()
+endforeach()
+if(VCAS_BUILD_V32_CANDIDATE_TEST)
+    if(MSVC)
+        target_compile_options(vehicle_dual_branch_router_contract_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(vehicle_dual_branch_router_contract_test PRIVATE -UNDEBUG)
+    endif()
+endif()
+
+add_executable(app_config_runtime_test tests/app_config_runtime_test.cpp)
+target_include_directories(app_config_runtime_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(app_config_runtime_test PRIVATE app_support camera_capture_runtime)
+add_test(NAME app_config_runtime_test COMMAND app_config_runtime_test
+    "${CMAKE_SOURCE_DIR}/config/server.yaml" "${CMAKE_SOURCE_DIR}/config/worker.yaml")
+set_tests_properties(app_config_runtime_test PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+add_executable(shared_camera_frame_hub_test tests/shared_camera_frame_hub_test.cpp)
+target_include_directories(shared_camera_frame_hub_test PRIVATE "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(shared_camera_frame_hub_test PRIVATE camera_capture_runtime ${OpenCV_LIBS})
+add_test(NAME shared_camera_frame_hub_test COMMAND shared_camera_frame_hub_test)
+
+add_executable(camera_task_manager_test tests/camera_task_manager_test.cpp)
+target_include_directories(camera_task_manager_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_task_manager_test PRIVATE camera_task_scheduling)
+add_test(NAME camera_task_manager_test COMMAND camera_task_manager_test)
+
+add_executable(camera_run_spec_test tests/camera_run_spec_test.cpp)
+target_include_directories(camera_run_spec_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_run_spec_test PRIVATE camera_run_contract)
+add_test(NAME camera_run_spec_test COMMAND camera_run_spec_test)
+
+add_executable(camera_inference_pool_test tests/camera_inference_pool_test.cpp)
+target_include_directories(camera_inference_pool_test PRIVATE "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_inference_pool_test PRIVATE camera_inference_pool ${OpenCV_LIBS})
+add_test(NAME camera_inference_pool_test COMMAND camera_inference_pool_test)
+
+add_executable(analysis_snapshot_writer_test
+    tests/analysis_snapshot_writer_test.cpp)
+target_include_directories(analysis_snapshot_writer_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(analysis_snapshot_writer_test PRIVATE
+    analysis_snapshot_writer ${OpenCV_LIBS} Threads::Threads)
+add_test(NAME analysis_snapshot_writer_test COMMAND analysis_snapshot_writer_test)
+
+add_executable(callback_delivery_worker_test tests/callback_delivery_worker_test.cpp)
+target_include_directories(callback_delivery_worker_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(callback_delivery_worker_test PRIVATE
+    callback_delivery_runtime camera_task_storage OpenSSL::Crypto)
+add_test(NAME callback_delivery_worker_test COMMAND callback_delivery_worker_test)
+set_tests_properties(callback_delivery_worker_test PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(callback_http_transport_test tests/callback_http_transport_test.cpp)
+target_include_directories(callback_http_transport_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(callback_http_transport_test PRIVATE callback_delivery_runtime)
+if(WIN32)
+    target_link_libraries(callback_http_transport_test PRIVATE ws2_32)
+endif()
+add_test(NAME callback_http_transport_test COMMAND callback_http_transport_test)
+
+add_executable(algorithm_runtime_heartbeat_test
+    tests/algorithm_runtime_heartbeat_test.cpp)
+target_include_directories(algorithm_runtime_heartbeat_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(algorithm_runtime_heartbeat_test PRIVATE
+    runtime_redis app_support)
+add_test(NAME algorithm_runtime_heartbeat_test
+    COMMAND algorithm_runtime_heartbeat_test)
+set_tests_properties(algorithm_runtime_heartbeat_test PROPERTIES
+    SKIP_RETURN_CODE 77)
+
+add_executable(worker_runtime_readiness_test
+    tests/worker_runtime_readiness_test.cpp)
+target_include_directories(worker_runtime_readiness_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}")
+add_test(NAME worker_runtime_readiness_test
+    COMMAND worker_runtime_readiness_test)
+
+add_executable(camera_task_lease_fence_test
+    tests/camera_task_lease_fence_test.cpp)
+target_include_directories(camera_task_lease_fence_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_task_lease_fence_test PRIVATE
+    camera_task_redis)
+add_test(NAME camera_task_lease_fence_test
+    COMMAND camera_task_lease_fence_test)
+set_tests_properties(camera_task_lease_fence_test PROPERTIES
+    SKIP_RETURN_CODE 77)
+
+add_executable(camera_task_repository_test tests/camera_task_repository_test.cpp)
+target_include_directories(camera_task_repository_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_task_repository_test PRIVATE camera_task_storage)
+target_compile_definitions(camera_task_repository_test PRIVATE
+    YOLO11_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME camera_task_repository_test COMMAND camera_task_repository_test)
+set_tests_properties(camera_task_repository_test PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(vehicle_event_repository_test
+    tests/vehicle_event_repository_test.cpp)
+target_include_directories(vehicle_event_repository_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(vehicle_event_repository_test PRIVATE
+    vehicle_event_persistence nlohmann_json::nlohmann_json)
+add_test(NAME vehicle_event_repository_test
+    COMMAND vehicle_event_repository_test)
+set_tests_properties(vehicle_event_repository_test PROPERTIES
+    SKIP_RETURN_CODE 77)
+
+add_executable(camera_frame_extraction_test tests/camera_frame_extraction_test.cpp)
+target_include_directories(camera_frame_extraction_test PRIVATE "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_frame_extraction_test PRIVATE camera_task_runtime ${OpenCV_LIBS})
+add_test(NAME camera_frame_extraction_test COMMAND camera_frame_extraction_test)
+set_tests_properties(camera_frame_extraction_test PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(camera_storage_policy_test tests/camera_storage_policy_test.cpp)
+target_include_directories(camera_storage_policy_test PRIVATE "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_storage_policy_test PRIVATE camera_task_runtime ${OpenCV_LIBS})
+add_test(NAME camera_storage_policy_test COMMAND camera_storage_policy_test)
+set_tests_properties(camera_storage_policy_test PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(camera_frame_resilience_test tests/camera_frame_resilience_test.cpp)
+target_include_directories(camera_frame_resilience_test PRIVATE "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(camera_frame_resilience_test PRIVATE camera_capture_runtime ${OpenCV_LIBS})
+add_test(NAME camera_frame_resilience_test COMMAND camera_frame_resilience_test)
+
+add_executable(camera_task_http_contract_test tests/camera_task_http_contract_test.cpp)
+target_include_directories(camera_task_http_contract_test PRIVATE "${PROJECT_INCLUDE_DIR}")
+target_link_libraries(camera_task_http_contract_test PRIVATE
+    camera_task_http nlohmann_json::nlohmann_json)
+add_test(NAME camera_task_http_contract_test COMMAND camera_task_http_contract_test)
+set_tests_properties(camera_task_http_contract_test PROPERTIES SKIP_RETURN_CODE 77)
+
+# Hardware benchmark for the production vehicle RTSP -> TensorRT path. It is
+# intentionally excluded from CTest because it needs the release engine and,
+# in RTSP mode, a reachable stream.
+add_executable(vehicle_tensorrt_benchmark
+    tests/vehicle_tensorrt_benchmark.cpp)
+target_include_directories(vehicle_tensorrt_benchmark PRIVATE
+    "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(vehicle_tensorrt_benchmark PRIVATE
+    vehicle_tensorrt_adapters vehicle_cascade_core camera_capture_runtime
+    analysis_snapshot_writer
+    nlohmann_json::nlohmann_json ${OpenCV_LIBS})
+
+add_executable(vehicle_gpu_pipeline_parity_test
+    tests/vehicle_gpu_pipeline_parity_test.cpp)
+target_include_directories(vehicle_gpu_pipeline_parity_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(vehicle_gpu_pipeline_parity_test PRIVATE
+    vehicle_tensorrt_adapters ${OpenCV_LIBS})
+
+# Hardware contract test for padded I420 planes and retained CUDA-frame pool
+# resizing. It is intentionally excluded from CTest because it needs a GPU.
+add_executable(vehicle_cuda_preprocess_contract_test
+    tests/vehicle_cuda_preprocess_contract_test.cpp)
+target_include_directories(vehicle_cuda_preprocess_contract_test PRIVATE
+    "${PROJECT_INCLUDE_DIR}" "${YOLO11_CUDA_ROOT}/include")
+target_link_libraries(vehicle_cuda_preprocess_contract_test PRIVATE
+    vehicle_tensorrt_adapters "${CUDART_LIB}")
+
+add_executable(vehicle_attribute_gpu_benchmark
+    tests/vehicle_attribute_gpu_benchmark.cpp)
+target_include_directories(vehicle_attribute_gpu_benchmark PRIVATE
+    "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(vehicle_attribute_gpu_benchmark PRIVATE
+    vehicle_tensorrt_adapters nlohmann_json::nlohmann_json ${OpenCV_LIBS})
+
+add_executable(vehicle_multistream_benchmark
+    tests/vehicle_multistream_benchmark.cpp)
+target_include_directories(vehicle_multistream_benchmark PRIVATE
+    "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(vehicle_multistream_benchmark PRIVATE
+    vehicle_tensorrt_adapters nlohmann_json::nlohmann_json
+    ${OpenCV_LIBS} Threads::Threads)
+
+# Hardware A/B benchmark for the fixed production inference pool and the
+# process-wide vehicle attribute scheduler.  It is intentionally excluded
+# from CTest because it needs an NVIDIA GPU, production engines and RTSP.
+add_executable(vehicle_async_pipeline_benchmark
+    tests/vehicle_async_pipeline_benchmark.cpp)
+target_include_directories(vehicle_async_pipeline_benchmark PRIVATE
+    "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(vehicle_async_pipeline_benchmark PRIVATE
+    camera_inference_pool camera_capture_runtime vehicle_tensorrt_adapters
+    vehicle_attribute_scheduler nlohmann_json::nlohmann_json
+    ${OpenCV_LIBS} Threads::Threads)
+
+# Real-RTSP smoke target; intentionally not part of CTest because it requires
+# a reachable camera and its URI must be supplied through the configured env.
+add_executable(rtsp_capture_smoke tests/rtsp_capture_smoke.cpp)
+target_include_directories(rtsp_capture_smoke PRIVATE "${PROJECT_INCLUDE_DIR}" ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rtsp_capture_smoke PRIVATE camera_capture_runtime ${OpenCV_LIBS})
+
+install(TARGETS four_stage_server four_stage_worker RUNTIME DESTINATION bin)
+install(FILES config/server.yaml config/worker.yaml config/cameras.yaml DESTINATION config)
+install(DIRECTORY web/camera-admin DESTINATION web)

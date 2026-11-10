@@ -1,0 +1,16 @@
+# Phase 19.2 active camera registry.
+# Never place a real RTSP URI, username, or password in this file.
+cameras:
+  entry_camera_01:
+    source_type: "rtsp"
+    url_env: "YOLO11_CAMERA_ENTRY_URL"
+    display_name: "Entry camera 1"
+    transport: "tcp"
+    enabled: true
+
+  entry_camera_02:
+    source_type: "rtsp"
+    url_env: "YOLO11_CAMERA_ENTRY_02_URL"
+    display_name: "Entry camera 2"
+    transport: "tcp"
+    enabled: true

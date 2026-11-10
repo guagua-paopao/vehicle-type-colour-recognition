@@ -1,0 +1,171 @@
+server:
+  host: "127.0.0.1"
+  port: 8087
+  threads: 4
+  enable_sync_detect: false
+  max_body_size_mb: 2
+
+model:
+  type: "vehicle_detection"
+  engine_path: "./engines/vehicle-det-v1.engine"
+  labels_path: "./config/vehicle_labels.v2.json"
+  gpu_id: 0
+  use_gpu_postprocess: false
+
+output:
+  save_result_image: false
+  input_dir: "./runtime/input/vehicles"
+  output_dir: "./runtime/output/vehicles"
+  jpeg_quality: 90
+
+stream:
+  enabled: false
+  camera_profiles_path: "./config/cameras.yaml"
+
+capture:
+  backend: "ffmpeg"
+  open_timeout_ms: 5000
+  read_timeout_ms: 3000
+  stale_frame_timeout_ms: 5000
+  buffer_size: 1
+  transport: "tcp"
+  latest_frame_only: true
+  warmup_frames: 10
+  reconnect_max_attempts: 0
+  reconnect_initial_delay_ms: 500
+  reconnect_max_delay_ms: 10000
+  status_update_interval_ms: 1000
+  allow_backend_fallback: false
+
+camera_hub:
+  enabled: true
+  max_active_hubs: 4
+  idle_grace_ms: 5000
+  require_ffmpeg_backend: true
+  status_update_interval_ms: 1000
+
+camera_tasks:
+  enabled: true
+  postgres_dsn_env: "YOLO11_POSTGRES_DSN"
+  output_dir: "./runtime/output/camera_frames"
+  admin_ui_dir: "./web/camera-admin"
+  command_stream_key: "yolo:stream:camera-frame"
+  consumer_group: "yolo11_camera_frame_group"
+  max_active_runs: 4
+  writer_threads: 2
+  writer_queue_capacity: 32
+  writer_queue_capacity_per_run: 8
+  status_ttl_seconds: 604800
+  lease_ttl_seconds: 30
+  lease_refresh_seconds: 5
+  stale_run_timeout_ms: 30000
+  retention_sweep_interval_seconds: 60
+  retention_batch_size: 500
+  admin_token_env: "YOLO11_CAMERA_TASK_ADMIN_TOKEN"
+  storage:
+    max_archive_bytes: 21474836480
+    min_free_bytes: 1073741824
+    high_watermark_percent: 85
+    critical_watermark_percent: 95
+    pressure_cleanup_batch_size: 1000
+    backup_dir: "./runtime/backups"
+    backup_retention_count: 7
+  defaults:
+    frame_interval_ms: 1000
+    output_mode: "latest"
+    jpeg_quality: 90
+    max_width: 0
+    max_height: 0
+    retention_days: 7
+    max_saved_frames: 100000
+    analysis_enabled: false
+    target_infer_fps: 5
+    algorithm_profile: ""
+    algorithms: []
+    callback_profile: ""
+
+analysis:
+  enabled: true
+  inference_workers: 2
+  model_init_timeout_ms: 120000
+  async_result_dispatch: false
+  result_queue_capacity: 2
+  supported_algorithms:
+    - "vehicle_detection"
+    - "vehicle_attribute"
+vehicle_analytics:
+  enabled: true
+  config_path: "./config/vehicle_analytics.yaml"
+  model_registry_path: "./models/manifests/model_registry.v1.json"
+  observation_retention_days: 7
+  snapshot_fps: 2
+  jpeg_quality: 90
+  attribute_contexts: 2
+  dynamic_batching: false
+  async_snapshots: true
+  snapshot_writer_threads: 1
+  snapshot_queue_capacity: 2
+
+callbacks:
+  enabled: false
+  poll_interval_ms: 250
+  request_timeout_ms: 5000
+  lease_timeout_ms: 30000
+  max_attempts: 8
+  initial_backoff_ms: 1000
+  max_backoff_ms: 300000
+  request_body_limit_bytes: 1048576
+  response_body_limit_bytes: 4096
+  profiles:
+    backend_primary:
+      enabled: true
+      url_env: "YOLO11_CALLBACK_BACKEND_PRIMARY_URL"
+      hmac_secret_env: "YOLO11_CALLBACK_BACKEND_PRIMARY_SECRET"
+      allow_insecure_http: false
+
+redis:
+  enabled: true
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+  stream_key: "car-detect:stream:vehicle"
+  consumer_group: "car_detect_vehicle_group"
+  consumer_name: "car_detect_worker_1"
+  block_ms: 500
+  ttl_seconds: 1800
+  task_ttl_seconds: 604800
+  stream_max_len: 10000
+  enable_pending_reclaim: true
+  pending_min_idle_ms: 60000
+  max_redis_used_memory_mb: 2048
+
+worker:
+  enabled: false
+  worker_num: 1
+  min_alive_workers: 1
+  consumer_name_prefix: "car_detect_worker_"
+  log_task_done: true
+  worker_group: "car_detect_gpu0"
+  worker_kind: "vision_host"
+  task_kind: "camera_pipeline"
+  stream_type: "long_running_stream"
+  max_concurrency: 1
+  heartbeat_enabled: true
+  heartbeat_interval_ms: 3000
+  heartbeat_ttl_seconds: 30
+
+logging:
+  enabled: true
+  log_dir: "./runtime/logs/car_detect/server"
+  level: "info"
+  console: true
+  file: true
+  flush_interval_sec: 3
+  max_file_size_mb: 50
+  max_files: 5
+
+metrics:
+  enabled: true
+  recent_window_seconds: 60
+  ttl_seconds: 3600
