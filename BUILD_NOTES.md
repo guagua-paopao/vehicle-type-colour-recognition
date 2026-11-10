@@ -1,10 +1,10 @@
 # Build Notes
 
-How to build this project, how I put it together, and what I learned.
+How to build this, the order I built it in, and what I learned.
 
 ## Build and test
 
-This project runs on Windows with an NVIDIA GPU. It needs Windows x64, MSVC, Ninja, CUDA, TensorRT, OpenCV, Redis, PostgreSQL and vcpkg.
+You'll need a Windows machine with an NVIDIA GPU, plus MSVC, Ninja, CUDA, TensorRT, OpenCV, Redis, PostgreSQL and vcpkg.
 
 Change the paths to match your machine:
 
@@ -18,28 +18,28 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_backend.ps1 `
 powershell -ExecutionPolicy Bypass -File .\scripts\test_all.ps1
 ```
 
-The trained models and the datasets are not in this repository, so the service needs your own models before it can analyse video. The scripts I used for data preparation and training are in `training/`.
+The trained models and datasets aren't in this repo, so you'll need your own models before it can analyse video. The scripts I used for data prep and training are in `training/`.
 
 ## How I built it
 
-I started from my people-flow project and kept the parts that were not specific to people: the shared camera reader, task control, PostgreSQL storage, callbacks and monitoring. The vehicle logic was built as its own module, and the people-counting code was removed once the vehicle version could replace it.
+I started from my people-flow project and kept the parts that had nothing to do with people, like the shared camera reader, task control, PostgreSQL storage, callbacks and monitoring. I wrote the vehicle logic as its own module and deleted the people-counting code once the vehicle version could replace it.
 
-1. **Fix the starting point.** Freeze the baseline, the config and the event format.
-2. **Data rules.** Define the vehicle labels, keep a record of dataset licences, and write labelling rules.
-3. **Model interfaces.** Common runners for the detection and attribute models, and a registry of model versions.
-4. **The main pipeline.** Track vehicles, reject poor pictures, and combine several frames into one answer per vehicle.
-5. **Storage and API.** Vehicle events, snapshots, search and callbacks.
-6. **Release checks.** Automatic checks for performance, stability and rollback.
-7. **Real models.** Train the models, export them to ONNX and build them for TensorRT.
-8. **Speed.** Three rounds of GPU optimisation, measuring after every change.
+1. First I froze the baseline, the config and the event format.
+2. Then I sorted out the data side: vehicle labels, labelling rules and a record of dataset licences.
+3. I wrote common runners for the detection and attribute models, plus a registry to keep track of model versions.
+4. Next came the main pipeline, which tracks vehicles, throws out bad pictures and combines several frames into one answer per vehicle.
+5. After that I added storage and an API for vehicle events, snapshots, search and callbacks.
+6. I set up automatic checks for performance, stability and rollback.
+7. Then I trained the real models, exported them to ONNX and built them for TensorRT.
+8. Finally I did three rounds of GPU optimisation, measuring after every change.
 
-Two queues keep it running in real time. The detector only keeps the newest waiting frame for each camera, so it does not fall behind. Type and colour recognition has its own limited queue, which removes duplicates and prefers the best pictures, so slow classification cannot hold up detection.
+The detector only keeps the newest waiting frame for each camera so it doesn't fall behind, and type and colour recognition has its own limited queue so it can't hold up detection.
 
 ## What I learned
 
-- **Check the data before trusting it.** A review of the first 600 priority samples rejected 379 as unrecognisable. 3,254 body-type labels generated automatically by a vision-language model were too unstable to train on, so I switched them off and kept the 810 reviewed labels.
-- **"Unknown" is a valid answer.** The system only answers when it is confident. The cost is real: across a vehicle's whole journey, about half still end up with an unknown type.
-- **Training and deployment must prepare images the same way.** I matched colour order, resizing and input range between training and the C++ program, and built the normalisation into the exported model.
-- **Measure before keeping an optimisation.** GPU video decoding cut FFmpeg's CPU time by about 21%, but live delay did not really improve and memory use rose by about 270 MB, because frames still had to be copied back from the GPU. I left it off.
-- **Prove a speed-up did not change the results.** After optimising, I compared outputs on 200 frames and 1,418 vehicle pictures and found no difference.
-- **The bottleneck moves.** After the optimisation work, the two ConvNeXt models take about 54% of the time per frame, so that is where further speed-ups would have to come from.
+- A review of the first 600 priority samples threw out 379 as unrecognisable, and 3,254 auto-generated body-type labels were too unstable to train on, so I switched those off and kept the 810 reviewed ones.
+- It only answers when it's confident, so about half of vehicles still end up as "unknown" for type by the end of their journey.
+- Training and the C++ program have to prepare images in exactly the same way, so I matched them up and built the normalisation into the exported model.
+- GPU video decoding saved about 21% of FFmpeg's CPU time, but live delay barely changed and memory went up by about 270 MB, so I left it off.
+- After speeding things up I compared the outputs on 200 frames and 1,418 vehicle pictures and found no difference.
+- The two ConvNeXt models now take about 54% of the time per frame, so any more speed would have to come from there.
